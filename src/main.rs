@@ -1,10 +1,13 @@
 use core::panic;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
+
+use uuid::Uuid;
 
 const DEFAULT_INVENTORY_CAPACITY: u32 = 100;
 const DEFAULT_INVENTORY_AMOUNT: u32 = 10;
 const DEFAULT_BALANCE: i32 = 100;
 
+type AgentId = Uuid;
 type CommodityName = String;
 type ProductionStrategyName = String;
 
@@ -37,15 +40,19 @@ fn main() {
     println!("{:#?}", market.agents);
     println!("===================");
     market.run_production_step();
+    market.run_production_step();
+    market.run_production_step();
+    market.run_production_step();
     println!("{:#?}", market.agents);
 }
 
 #[derive(Default, Debug)]
 pub struct Market {
-    pub buy_offers: Vec<TradeOffer>,
-    pub sell_offers: Vec<TradeOffer>,
-    pub agents: Vec<Agent>,
+    pub buy_offers: HashMap<CommodityName, BinaryHeap<Trade>>,
+    pub sell_offers: HashMap<CommodityName, BinaryHeap<Trade>>,
+    pub agents: HashMap<Uuid, Agent>,
     pub production_strategies: HashMap<ProductionStrategyName, ProductionStrategy>,
+    pub trades: HashMap<CommodityName, Vec<Trade>>,
 }
 
 impl Market {
@@ -59,27 +66,63 @@ impl Market {
     }
 
     pub fn add_agent(&mut self) -> MarketAgentBuilder {
-        self.agents.push(Agent::new());
+        let agent = Agent::new();
+        let agent_id = agent.id;
+        self.agents.insert(agent.id, agent);
 
         MarketAgentBuilder {
             production_strategies: &self.production_strategies,
-            agent: self.agents.last_mut().unwrap(),
+            agent: self.agents.get_mut(&agent_id).unwrap(),
         }
     }
 
     pub fn get_agents_mut(&mut self) -> impl Iterator<Item = MarketAgentBuilder> {
-        self.agents.iter_mut().map(|agent| -> MarketAgentBuilder {
-            MarketAgentBuilder {
-                agent,
-                production_strategies: &self.production_strategies,
-            }
-        })
+        self.agents
+            .iter_mut()
+            .map(|(_, agent)| -> MarketAgentBuilder {
+                MarketAgentBuilder {
+                    agent,
+                    production_strategies: &self.production_strategies,
+                }
+            })
+    }
+
+    // TODO: Memoize
+    fn get_historic_price(&self, commodity_name: &CommodityName) -> i32 {
+        if let Some(trades) = self.trades.get(commodity_name) {
+            trades.iter().map(|trade| trade.price).sum::<i32>() / trades.len() as i32
+        } else {
+            0
+        }
     }
 
     pub fn run_production_step(&mut self) {
         self.agents
             .iter_mut()
-            .for_each(|agent| agent.run_production_step(&self.production_strategies))
+            .for_each(|(_, agent)| agent.run_production_step(&self.production_strategies))
+    }
+}
+
+#[derive(Debug)]
+pub struct Trade {
+    buyer_id: AgentId,
+    seller_id: AgentId,
+    commodity_name: CommodityName,
+    price: i32,
+}
+
+#[derive(Debug)]
+pub struct PriceBelief {
+    upper: i32,
+    lower: i32,
+}
+
+impl PriceBelief {
+    fn new() -> Self {
+        Self {
+            upper: 100,
+            lower: 0,
+        }
     }
 }
 
@@ -117,9 +160,11 @@ impl MarketAgentBuilder<'_> {
 
 #[derive(Default, Debug)]
 pub struct Agent {
+    pub id: Uuid,
     pub inventories: HashMap<CommodityName, Inventory>,
     pub producers: Vec<Producer>,
     pub balance: i32,
+    pub price_beliefs: HashMap<CommodityName, PriceBelief>,
 }
 
 #[derive(Debug)]
@@ -140,6 +185,7 @@ impl Producer {
 impl Agent {
     fn new() -> Self {
         Self {
+            id: Uuid::new_v4(),
             balance: DEFAULT_BALANCE,
             ..Self::default()
         }
@@ -159,6 +205,10 @@ impl Agent {
         } else {
             0
         }
+    }
+
+    pub fn get_trade_offers(&self) {
+        todo!()
     }
 
     pub fn run_production_step(
@@ -251,6 +301,7 @@ impl Agent {
 pub struct Inventory {
     pub capacity: u32,
     pub amount: u32,
+    pub ideal_amount: u32,
     pub reserved: u32,
 }
 
@@ -260,11 +311,12 @@ impl Inventory {
             amount: DEFAULT_INVENTORY_AMOUNT,
             capacity,
             reserved: 0,
+            ideal_amount: 10,
         }
     }
 
     fn add(&mut self, amount: u32) {
-        if (amount > self.free()) {
+        if amount > self.free() {
             panic!("Tried to add more than there is room for")
         }
 
@@ -272,7 +324,7 @@ impl Inventory {
     }
 
     fn remove(&mut self, amount: u32) {
-        if (amount > self.free()) {
+        if amount > self.free() {
             panic!("Tried to remove more than is available")
         }
 
@@ -387,11 +439,9 @@ pub struct TradeOffer {
 }
 
 mod tests {
-    use crate::Market;
-
     #[test]
     fn production_step() {
-        let mut market = Market::default();
+        let mut market = crate::Market::default();
 
         market
             .add_production_strategy("farmer")
@@ -402,7 +452,7 @@ mod tests {
         market.add_agent().add_production_strategy("farmer");
 
         {
-            let agent = market.agents.last().unwrap();
+            let agent = market.agents.iter().last().unwrap().1;
             assert_eq!(agent.producers.last().unwrap().progress, 0);
             assert_eq!(agent.inventories.get("water").unwrap().amount, 10);
             assert_eq!(agent.inventories.get("food").unwrap().amount, 10);
@@ -411,7 +461,7 @@ mod tests {
         market.run_production_step();
 
         {
-            let agent = market.agents.last().unwrap();
+            let agent = market.agents.iter().last().unwrap().1;
             assert_eq!(agent.producers.last().unwrap().progress, 1);
             assert_eq!(agent.inventories.get("water").unwrap().amount, 10);
             assert_eq!(agent.inventories.get("food").unwrap().amount, 10);
@@ -420,7 +470,7 @@ mod tests {
         market.run_production_step();
 
         {
-            let agent = market.agents.last().unwrap();
+            let agent = market.agents.iter().last().unwrap().1;
             assert_eq!(agent.producers.last().unwrap().progress, 0);
             assert_eq!(agent.inventories.get("water").unwrap().amount, 9);
             assert_eq!(agent.inventories.get("food").unwrap().amount, 11);
